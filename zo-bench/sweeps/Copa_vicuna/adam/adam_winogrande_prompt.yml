@@ -1,0 +1,49 @@
+name: adam_copa_prompt
+project: zo_bench_copa_vicuna-7b
+command:
+  - ${interpreter}
+  - ${program}
+  - ${args}
+  - "--prompt_tuning"
+  - "--num_virtual_tokens=10"
+  - "--prompt_init_by_real_tokens"
+  - "--model_name=lmsys/vicuna-7b-v1.5"
+  - "--task_name=Copa"
+  - "--output_dir=result/Copa-ft-$TAG"
+  - "--num_train_epochs=5"
+  - "--per_device_train_batch_size=16"
+  - "--load_best_model_at_end"
+  - "--evaluation_strategy=steps"
+  - "--save_strategy=steps"
+  - "--save_total_limit=1"
+  - "--eval_steps=500"
+  - "--max_steps=20000"
+  - "--logging_steps=10"
+  - "--num_eval=1000"
+  - "--num_train=1000"
+  - "--num_dev=100"
+  - "--train_as_classification=False"
+  - "--perturbation_mode=two_side"
+  - "--trainer=regular"
+  - "--optimizer=adam"
+  - "--train_set_seed=0"
+  - "--lr_scheduler_type=constant"
+  - "--save_steps=500"
+  - "--load_bfloat16"
+method: grid
+metric:
+  goal: maximize
+  name: test_acc
+parameters:
+  learning_rate:
+    values:
+      - 1e-2
+      - 1e-3
+      - 1e-4
+      - 1e-5
+      - 1e-6
+  weight_decay:
+    values:
+      - 0
+
+program: run.py

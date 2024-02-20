@@ -1,0 +1,50 @@
+name: sign_opt_cls_ft_dudu
+project: zo_bench
+command:
+- ${interpreter}
+- ${program}
+- ${args}
+- "--model_name=facebook/opt-1.3b"
+- "--task_name=SST2"
+- "--output_dir=result/SST2-ft-$TAG"
+- "--num_train_epochs=5"
+- "--per_device_train_batch_size=16"
+- "--load_best_model_at_end"
+- "--evaluation_strategy=steps"
+- "--save_strategy=steps"
+- "--save_total_limit=1"
+- "--eval_steps=1000"
+- "--max_steps=20000"
+- "--logging_steps=10"
+- "--num_eval=1000"
+- "--num_train=1000"
+- "--num_dev=500"
+- "--train_as_classification"
+- "--perturbation_mode=two_side"
+- "--trainer=zo_sign_opt"
+- "--train_set_seed=0"
+- "--lr_scheduler_type=constant"
+- "--eval_steps=500"
+- "--save_steps=500"
+method: grid
+metric:
+  goal: maximize
+  name: test_acc
+parameters:
+  learning_rate:
+    values:
+      - 1e-4
+      # - 1e-5
+      - 1e-6
+      # - 1e-7
+      - 1e-8
+  zo_eps:
+    values:
+      - 1e-3
+      # - 1e-4
+      - 1e-5
+  weight_decay:
+    values:
+      - 0
+
+program: run.py

@@ -1,0 +1,52 @@
+name: sgd_cls_prompt
+project: zo_bench
+command:
+  - ${interpreter}
+  - ${program}
+  - ${args}
+  # Ref run according to `MODEL=facebook/opt-1.3b TASK=SST2 MODE=prompt LR=1e-2 bash finetune.sh`
+  # python run.py --model_name facebook/opt-1.3b --task_name SST2 --output_dir result/SST2-opt-1.3b-prompt-5-8-1e-2-0 --tag prompt-5-8-1e-2-0 --train_set_seed 0 --num_train 1000 --num_dev 500 --num_eval 1000 --logging_steps 10 --trainer regular --fp16 --learning_rate 1e-2 --num_train_epochs 5 --per_device_train_batch_size 8 --load_best_model_at_end --evaluation_strategy epoch --save_strategy epoch --save_total_limit 1 --train_as_classification --prompt_tuning --num_virtual_tokens 10 --prompt_init_by_real_tokens"
+  - "--prompt_tuning"
+  - "--num_virtual_tokens=10"
+  - "--prompt_init_by_real_tokens"
+  - "--model_name=facebook/opt-1.3b"
+  - "--task_name=SST2"
+  - "--output_dir=result/SST2-ft-$TAG"
+  - "--num_train_epochs=5"
+  # - "--per_device_train_batch_size=16"  # TODO  this one should be smaller.
+  - "--load_best_model_at_end"
+  - "--evaluation_strategy=epoch"
+  - "--save_strategy=epoch"
+  - "--save_total_limit=1"
+  # - "--max_steps=20000"  # TODO  this one should remove
+  - "--logging_steps=10"
+  - "--num_eval=1000"
+  - "--num_train=1000"
+  - "--num_dev=500"
+  - "--train_as_classification"
+  - "--perturbation_mode=two_side"
+  - "--trainer=sgd"
+  - "--train_set_seed=0"
+  - "--lr_scheduler_type=constant"
+  - "--eval_steps=500"
+  - "--save_steps=500"
+  #  params that were missing. I added according to finetune.sh. All FO methods should follow to update.
+  - "--fp16"
+  - "--per_device_train_batch_size=8"
+method: grid
+metric:
+  goal: maximize
+  name: test_acc
+parameters:
+  learning_rate:
+    values:
+      - 1e-4
+      - 1e-5
+      - 1e-6
+      - 1e-7
+      - 1e-8
+  weight_decay:
+    values:
+      - 0
+
+program: run.py
