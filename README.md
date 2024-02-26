@@ -8,8 +8,8 @@
 Official code for the paper **"Revisiting Zeroth-Order Optimization for Memory-Efficient LLM Fine-Tuning: A Benchmark
 "**.
 
-Authors: _[Yihua Zhang](https://www.yihua-zhang.com/), [Pingzhi Li](https://pingzhili.github.io/),
-[Junyuan Hong](https://jyhong.gitlab.io/), [Jiaxiang Li](https://jasonjiaxiangli.github.io/),
+Authors: _[Yihua Zhang](https://www.yihua-zhang.com/)\*, [Pingzhi Li](https://pingzhili.github.io/)\*,
+[Junyuan Hong](https://jyhong.gitlab.io/)\*, [Jiaxiang Li](https://jasonjiaxiangli.github.io/),
 [Yimeng Zhang](https://damon-demon.github.io/), [Wenqing Zheng](https://wenqing-zheng.github.io/),
 [Pin-Yu Chen](https://sites.google.com/site/pinyuchenpage/home), [Jason D. Lee](https://jasondlee88.github.io/),
 [Wotao Yin](https://wotaoyin.mathopt.com/), [Mingyi Hong](https://people.ece.umn.edu/~mhong/mingyi.html),
