@@ -1,7 +1,7 @@
 🌄 Revisiting Zeroth-Order Optimization for Memory-Efficient LLM Fine-Tuning: A Benchmark
 ====================================================
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 [[Paper]](https://arxiv.org/pdf/2402.11592.pdf) [[Code]](https://github.com/ZO-Bench/ZO-LLM) [[Website]](https://sites.google.com/view/zo-tutorial-aaai-2024/)
 
