@@ -135,7 +135,9 @@ methods. All optimization methods are implemented in `zo-bench/trainer.py`. Task
 All you need is:
 
 ```bash
-conda env create -f environment.yml
+conda create -n zollm python=3.10
+conda activate zollm
+pip install -r requirements.txt
 ```
 
 ## 4) Reproducing Results
