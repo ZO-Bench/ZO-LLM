@@ -4,7 +4,7 @@ command:
   - ${interpreter}
   - ${program}
   - ${args}
-  - "--model_name=facebook/opt-13b"
+  - "--model_name=facebook/opt-1.3b"
   - "--task_name=SST2"
   - "--output_dir=result/SST2-ft-$TAG"
   - "--num_train_epochs=5"
