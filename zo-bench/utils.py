@@ -22,6 +22,26 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
 
+# fixme: only support OPT now
+OPT_PERTURBATION_LEVEL_TO_REGEX = {
+    "transformer-block": r".*model\.decoder\.layers\.[0-9]+$"
+                         r"|.*model\.decoder\.embed_.*"
+                         r"|.*model\.decoder\.final_layer_norm$",
+    "mlp-attn": r".*model\.decoder\.layers\.[0-9]+\.self_attn$"
+                r"|.*model\.decoder\.layers\.[0-9]+\.fc[12]$"
+                r"|.*model\.decoder\.layers\.[0-9]+\.final_layer_norm$"
+                r"|.*model\.decoder\.layers\.[0-9]+\.self_attn_layer_norm$"
+                r"|.*model\.decoder\.embed_.*"
+                r"|.*model\.decoder\.final_layer_norm$",
+    "linear": r".*model\.decoder\.layers\.[0-9]+\.self_attn.[qkv]_proj$"
+              r"|.*model\.decoder\.layers\.[0-9]+\.self_attn.out_proj$"
+              r"|.*model\.decoder\.layers\.[0-9]+\.fc[12]$"
+              r"|.*model\.decoder\.layers\.[0-9]+\.final_layer_norm$"
+              r"|.*model\.decoder\.layers\.[0-9]+\.self_attn_layer_norm$"
+              r"|.*model\.decoder\.embed_.*"
+              r"|.*model\.decoder\.final_layer_norm$",
+}
+
 
 def forward_wrap_with_option_len(
         self,

@@ -19,12 +19,14 @@ The Trainer class, to easily train a 🤗 Transformers from scratch or finetune 
 import inspect
 import math
 import os
+import re
 import shutil
 import sys
 import time
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Dict, Union, Any
+from typing import TYPE_CHECKING, Optional, Iterable
 
 import numpy as np
 import torch
@@ -73,7 +75,13 @@ from transformers.utils import (
 
 # from torch.optim.optimizer import StateDict, params_t
 import wandb
+from gradient_pruning.pruning_utils import (
+    fast_random_mask_like,
+    estimate_pretrained_model_magnitude_pruning_threshold,
+    compute_named_parameters_to_sparsity,
+)
 from metrics import f1
+from utils import OPT_PERTURBATION_LEVEL_TO_REGEX
 
 _is_native_cpu_amp_available = is_torch_greater_or_equal_than_1_10
 
@@ -120,11 +128,12 @@ SCALER_NAME = "scaler.pt"
 class OurTrainer(Trainer):
 
     # ZO-Bench added: new parameters to our traininer
-    def __init__(self, evaluate_func, dev_samples, eval_samples, *args, **kwargs):
+    def __init__(self, evaluate_func, dev_samples, eval_samples, perturb_module_regex, *args, **kwargs):
         super().__init__(*args, **kwargs)  # Initialize the base class
         self.evaluate_func = evaluate_func
         self.dev_samples = dev_samples
         self.eval_samples = eval_samples
+        self.perturb_module_regex = perturb_module_regex
 
     def _inner_training_loop(
             self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
@@ -415,6 +424,17 @@ class OurTrainer(Trainer):
 
         # Main training loop
         total_steps = 0
+        self.sparse_grad_rng = torch.Generator(device='cuda' if torch.cuda.is_available() else 'cpu')
+        self.gradient_sparsity = None  # None, float, or dict
+
+        if self.args.sparse_gradient_group == "layer" or self.args.gradient_sparsity is None:
+            self.gradient_sparsity = self.args.gradient_sparsity
+            print(f"### layer-wise gradient sparsity = {self.gradient_sparsity}")
+        elif self.args.sparse_gradient_group == "global":
+            threshold = estimate_pretrained_model_magnitude_pruning_threshold(model, self.args.gradient_sparsity)
+            self.gradient_sparsity = compute_named_parameters_to_sparsity(model, threshold)
+            print(f"### global gradient sparsity, weight magnitude threshold = {threshold}")
+
         for epoch in range(epochs_trained, num_train_epochs):
             print(f"-------------------------- Training Epoch {epoch} --------------------------")
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
@@ -446,6 +466,9 @@ class OurTrainer(Trainer):
             # Start one epoch training
             for step, inputs in enumerate(epoch_iterator):
 
+                if total_steps % self.args.sparse_gradient_resample_steps == 0:
+                    self.sparse_grad_random_seed = np.random.randint(1000000000)
+
                 total_steps += 1
 
                 # torch.cuda.synchronize()
@@ -468,7 +491,13 @@ class OurTrainer(Trainer):
 
                 # MeZO added: estimate gradient
                 if args.trainer in ["zo_sgd", "zo_adam", "zo_sign_opt"]:
-                    if args.q == 1:
+                    if args.module_wise_perturbation:
+                        assert args.q == 1, "module-wise perturbation only supports q=1"
+                        if args.coordinate_perturbation:
+                            tr_loss_step = self.zo_step_with_module_wise_perturbation_coordinate(model, inputs)
+                        else:
+                            tr_loss_step = self.zo_step_with_module_wise_perturbation(model, inputs)
+                    elif args.q == 1:
                         tr_loss_step = self.zo_step(model, inputs)
                     elif args.q > 1:
                         tr_loss_step = self.zo_step_v1(model, inputs)
@@ -694,9 +723,13 @@ class OurTrainer(Trainer):
 
         # Set the random seed to ensure that we sample the same z for perturbation/update
         torch.manual_seed(random_seed if random_seed is not None else self.zo_random_seed)
+        self.sparse_grad_rng.manual_seed(self.sparse_grad_random_seed)
 
-        for _, param in self.named_parameters_to_optim:
+        for name, param in self.named_parameters_to_optim:
+            grad_sparsity = self.get_grad_sparsity_by_name(name)
             z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            if grad_sparsity is not None:
+                z[fast_random_mask_like(z, grad_sparsity, generator=self.sparse_grad_rng)] = 0
             param.data = param.data + scaling_factor * z * self.args.zo_eps
 
     def zo_forward(self, model, inputs):
@@ -743,6 +776,231 @@ class OurTrainer(Trainer):
 
         return -torch.tensor(np.mean(f1s), dtype=torch.float32)
 
+    def get_grad_sparsity_by_name(self, name):
+        if self.gradient_sparsity is None:
+            return None
+        elif isinstance(self.gradient_sparsity, float):
+            return self.gradient_sparsity
+        elif isinstance(self.gradient_sparsity, dict):
+            return self.gradient_sparsity[name]
+
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+        """
+        Perform a training step on a batch of inputs.
+
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (`nn.Module`):
+                The model to train.
+            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument `labels`. Check your model's documentation for all accepted arguments.
+
+        Return:
+            `torch.Tensor`: The tensor with training loss on this batch.
+        """
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
+        with self.compute_loss_context_manager():
+            loss = self.compute_loss(model, inputs)
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
+            # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
+            loss = loss / self.args.gradient_accumulation_steps
+
+        if self.do_grad_scaling:
+            self.scaler.scale(loss).backward()
+        elif self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        elif self.deepspeed:
+            # loss gets scaled under gradient_accumulation_steps in deepspeed
+            loss = self.deepspeed.backward(loss)
+        else:
+            loss.backward()
+
+        # Sparse gradient
+        self.sparse_grad_rng.manual_seed(self.sparse_grad_random_seed)
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            grad_sparsity = self.get_grad_sparsity_by_name(name)
+            if grad_sparsity is not None:
+                param.grad[fast_random_mask_like(param.grad, grad_sparsity, generator=self.sparse_grad_rng)] = 0
+
+        return loss.detach()
+
+    @staticmethod
+    def grouped_module_iter(model: nn.Module, group_level: str) -> Iterable[nn.Module]:
+        """
+        Iterate over the top-level modules of a model and yield groups of modules that should be trained together.
+
+        Parameters
+        ----------
+        model: nn.Module
+            The model to iterate over.
+        group_level: str
+            The level at which to iterate over the model. One of "transformer", "mlp-attn", "linear"
+        """
+        reg_pattern = OPT_PERTURBATION_LEVEL_TO_REGEX[group_level]
+        for name, module in model.named_modules():
+            if re.match(reg_pattern, name):
+                yield name, module
+
+    @torch.no_grad()
+    def zo_step_with_module_wise_perturbation_coordinate(self, model, inputs):
+        """Update the parameters right after perturbing the parameters."""
+        args = self.args
+        perturbed_module_level = args.perturbed_module_level
+
+        # Sample the random seed for sampling z
+        self.zo_random_seed = np.random.randint(1000000000)
+
+        all_losses = []
+
+        # First function evaluation
+        # NOTE: when sparse_grad is set to True, it will also check the args.gradient_sparsity,
+        # so it does not necessarily use sparse grad.
+
+        # Second function evaluation
+        assert args.q == 1, "only support q=1 for the memory efficiency. If you want to implement q>1, need to store random seeds to save memory. In addition, we need to set different random seed for different z in the q-loop."
+        for module_name, module in self.grouped_module_iter(model, perturbed_module_level):
+            self.named_parameters_to_optim = []
+            for name, param in module.named_parameters():
+                if param.requires_grad:
+                    self.named_parameters_to_optim.append((f"{module_name}.{name}", param))
+                    param.grad = None  # Make sure the grad is empty and will not be updated.
+
+            self.zo_perturb_parameters(scaling_factor=1)
+            loss1 = self.zo_forward(model, inputs)
+
+            all_losses.append(loss1)
+
+            for _ in range(args.q):
+                if self.args.perturbation_mode == "one_side":
+                    self.zo_perturb_parameters(scaling_factor=-1)
+                    loss2 = self.zo_forward(model, inputs)
+                    self.projected_grad = ((loss1 - loss2) / self.args.zo_eps).item()
+                else:  # two side perturbation
+                    self.zo_perturb_parameters(scaling_factor=-2)
+                    loss2 = self.zo_forward(model, inputs)
+                    self.projected_grad = ((loss1 - loss2) / (2 * self.args.zo_eps)).item()
+
+                    # Reset model back to its parameters at start of step
+                    self.zo_perturb_parameters(scaling_factor=1)
+
+                # Set the random seed to ensure that we sample the same z for perturbation/update
+                torch.manual_seed(self.zo_random_seed)
+                self.sparse_grad_rng.manual_seed(self.sparse_grad_random_seed)
+                for name, param in self.named_parameters_to_optim:
+                    # Resample z
+                    z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device,
+                                     dtype=param.data.dtype)
+                    grad_sparsity = self.get_grad_sparsity_by_name(name)
+                    if grad_sparsity is not None:
+                        z[fast_random_mask_like(z, grad_sparsity, generator=self.sparse_grad_rng)] = 0
+
+                    if args.trainer == "zo_sign_opt":
+                        graddiff_times_z = np.sign(self.projected_grad) * z
+                    else:
+                        graddiff_times_z = self.projected_grad * z
+
+                    param.grad = graddiff_times_z / args.q  # NOTE this q division does not work for q>1.
+                    self.optimizer.step()  # will only update grad that is not None.
+                    param.grad = None  # avoid further update.
+
+        assert self.args.gradient_accumulation_steps == 1
+
+        print(f"[debugging] num blocks: {len(all_losses)}")
+
+        return torch.stack(all_losses).mean()
+
+    @torch.no_grad()
+    def zo_step_with_module_wise_perturbation(self, model, inputs):
+        """Update all parameters once after perturbing all the parameters."""
+        args = self.args
+        perturbed_module_level = args.perturbed_module_level
+
+        # Sample the random seed for sampling z
+        self.zo_random_seed = np.random.randint(1000000000)
+
+        all_losses = []
+        module_name_to_projected_grads = {}
+
+        # First function evaluation
+        # NOTE: when sparse_grad is set to True, it will also check the args.gradient_sparsity,
+        # so it does not necessarily use sparse grad.
+
+        # Second function evaluation
+        assert args.q == 1, "only support q=1 for the memory efficiency. If you want to implement q>1, need to store random seeds to save memory. In addition, we need to set different random seed for different z in the q-loop."
+        for module_name, module in self.grouped_module_iter(model, perturbed_module_level):
+            self.named_parameters_to_optim = []
+            for name, param in module.named_parameters():
+                if param.requires_grad:
+                    self.named_parameters_to_optim.append((f"{module_name}.{name}", param))
+                    param.grad = None  # Make sure the grad is empty and will not be updated.
+
+            self.zo_perturb_parameters(scaling_factor=1)
+            loss1 = self.zo_forward(model, inputs)
+
+            all_losses.append(loss1)
+
+            if self.args.perturbation_mode == "one_side":
+                self.zo_perturb_parameters(scaling_factor=-1)
+                loss2 = self.zo_forward(model, inputs)
+                self.projected_grad = ((loss1 - loss2) / self.args.zo_eps).item()
+            else:  # two side perturbation
+                self.zo_perturb_parameters(scaling_factor=-2)
+                loss2 = self.zo_forward(model, inputs)
+                self.projected_grad = ((loss1 - loss2) / (2 * self.args.zo_eps)).item()
+
+                # Reset model back to its parameters at start of step
+                self.zo_perturb_parameters(scaling_factor=1)
+
+            module_name_to_projected_grads[module_name] = self.projected_grad
+
+        for module_name, module in self.grouped_module_iter(model, perturbed_module_level):
+            self.named_parameters_to_optim = []
+            for name, param in module.named_parameters():
+                if param.requires_grad:
+                    self.named_parameters_to_optim.append((f"{module_name}.{name}", param))
+                    param.grad = None  # Make sure the grad is empty and will not be updated.
+
+            self.projected_grad = module_name_to_projected_grads[module_name]
+
+            # Set the random seed to ensure that we sample the same z for perturbation/update
+            torch.manual_seed(self.zo_random_seed)
+            self.sparse_grad_rng.manual_seed(self.sparse_grad_random_seed)
+            for name, param in self.named_parameters_to_optim:
+                # Resample z
+                z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device,
+                                 dtype=param.data.dtype)
+                grad_sparsity = self.get_grad_sparsity_by_name(name)
+                if grad_sparsity is not None:
+                    z[fast_random_mask_like(z, grad_sparsity, generator=self.sparse_grad_rng)] = 0
+
+                if args.trainer == "zo_sign_opt":
+                    graddiff_times_z = np.sign(self.projected_grad) * z
+                else:
+                    graddiff_times_z = self.projected_grad * z
+
+                param.grad = graddiff_times_z / args.q  # NOTE this q division does not work for q>1.
+                self.optimizer.step()  # will only update grad that is not None.
+                param.grad = None  # avoid further update.
+
+        assert self.args.gradient_accumulation_steps == 1
+
+        print(f"[debugging] num blocks: {len(all_losses)}")
+
+        return torch.stack(all_losses).mean()
+
     @torch.no_grad()
     def zo_step(self, model, inputs):
         """
@@ -763,6 +1021,8 @@ class OurTrainer(Trainer):
         self.zo_random_seed = np.random.randint(1000000000)
 
         # First function evaluation
+        # NOTE: when sparse_grad is set to True, it will also check the args.gradient_sparsity,
+        # so it does not necessarily use sparse grad.
         self.zo_perturb_parameters(scaling_factor=1)
         loss1 = self.zo_forward(model, inputs)
 
@@ -783,10 +1043,14 @@ class OurTrainer(Trainer):
 
             # Set the random seed to ensure that we sample the same z for perturbation/update
             torch.manual_seed(self.zo_random_seed)
+            self.sparse_grad_rng.manual_seed(self.sparse_grad_random_seed)
             for name, param in self.named_parameters_to_optim:
                 # Resample z
                 z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device,
                                  dtype=param.data.dtype)
+                grad_sparsity = self.get_grad_sparsity_by_name(name)
+                if grad_sparsity is not None:
+                    z[fast_random_mask_like(z, grad_sparsity, generator=self.sparse_grad_rng)] = 0
 
                 if args.trainer == "zo_sign_opt":
                     # ----signOpt_orig

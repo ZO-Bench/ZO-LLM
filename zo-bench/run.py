@@ -134,6 +134,27 @@ class OurArguments(TrainingArguments):
 
     clean_model_at_end: bool = True  # remove everthing at the end.
 
+    # sparse gradient pruning
+    gradient_sparsity: float = None
+    sparse_gradient_resample_steps: int = 1
+    sparse_gradient_group: str = "layer"
+    """
+    Options
+    ## - global: global sparsity will assign different sparsity to each layer, based on the pretrained weight magnitude
+    ## - layer: each layer has the same sparsity
+    """
+
+    # module-wise perturbation
+    module_wise_perturbation: bool = False
+    perturbed_module_level: str = "transformer-block"
+    coordinate_perturbation: bool = True  # If True, will update weight right after the gradient is computed
+    """
+    Options
+    ## - transformer-block: perturb one transformer block at a time
+    ## - mlp-attn: perturb one mlp/attention layer at a time
+    ## - linear: perturb one linear layer at a time
+    """
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -490,6 +511,28 @@ class Framework:
         else:
             collator = DataCollatorForTokenClassification
 
+        if self.args.gradient_sparsity is not None:
+            logger.info(
+                f"[Sparse gradient] sparsity is {self.args.gradient_sparsity}, resampling per {self.args.sparse_gradient_resample_steps} steps"
+            )
+
+            if self.args.sparse_gradient_group == "global":
+                logger.info(f"[Sparse gradient] global-ratio random pruning is enabled, "
+                            f"sparsity of each layer is computed based on the pretrained weight magnitude.")
+            elif self.args.sparse_gradient_group == "layer":
+                logger.info(f"[Sparse gradient] layer-wise random pruning is enabled, "
+                            f"sparsity of each layer is the same.")
+            else:
+                raise NotImplementedError(f"Unknown sparse gradient group: {self.args.sparse_gradient_group}")
+
+        perturb_module_regex = None
+        if self.args.module_wise_perturbation:
+            if "opt" in self.args.model_name:
+                assert self.args.perturbed_module_level in OPT_PERTURBATION_LEVEL_TO_REGEX.keys(), f"Unknown perturbed module group {self.args.perturbed_module_level}"
+                perturb_module_regex = OPT_PERTURBATION_LEVEL_TO_REGEX[self.args.perturbed_module_level]
+            else:
+                raise NotImplementedError(f"Unimplemented model {self.args.model_name} for module-wise perturbation")
+
         trainer = OurTrainer(model=self.model,
                              args=self.args,
                              train_dataset=train_dataset,
@@ -501,6 +544,7 @@ class Framework:
                              eval_samples=eval_samples,
                              dev_samples=dev_samples,
                              evaluate_func=self.evaluate,
+                             perturb_module_regex=perturb_module_regex,
                              )
         if self.args.save_on_interrupt:
             trainer.add_callback(SIGUSR1Callback())
@@ -572,6 +616,8 @@ def main():
         args.mode = "ft"
     args.tag = f"{args.trainer}-{args.task_name}-{args.template_ver}-{args.model_name.split('/')[-1]}-OPTIM_{args.mode}-STEP{args.max_steps}-{args.optimizer}-LR{args.learning_rate}-{args.lr_scheduler_type}-ZOEPS{args.zo_eps}-Q{args.q}"
     args.tag = "momen" + args.tag if args.momentum > 0 else args.tag
+    args.tag = f"sparse_grad-{args.gradient_sparsity}-{args.sparse_gradient_group}-{args.sparse_gradient_resample_steps}-" + args.tag if args.gradient_sparsity is not None else args.tag
+    args.tag = f"module_perturb-{args.perturbed_module_level}-" + args.tag if args.module_wise_perturbation else args.tag
     args.run_name = args.tag
     args.output_dir = f"result/{args.tag}"
     args.result_file = f"result/{args.tag}/results.json"
