@@ -159,7 +159,7 @@ wandb: Run sweep agent with: wandb agent <unique ID>
 ```
 For the Extended Study, please check the following code:
 
-* **Block-wise ZO**: Add the argument `--module_wise_perturbation=True` to the command line. Note that temporarily we only support OPT family models.
+* **Block-wise ZO**: Add the argument `--module_wise_perturbation=True` to the command line. Note that temporarily we only support OPT family models. For example:
 ```
 python run.py --model_name=facebook/opt-1.3b --task_name=SST2 --output_dir=result/SST2-ft-$TAG --num_train_epochs=5 \
 --per_device_train_batch_size=16 --load_best_model_at_end --evaluation_strategy=steps --save_strategy=steps \
