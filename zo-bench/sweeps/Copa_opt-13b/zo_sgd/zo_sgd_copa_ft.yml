@@ -4,7 +4,7 @@ command:
   - ${interpreter}
   - ${program}
   - ${args}
-  - "--model_name=facebook/opt-1.3b"
+  - "--model_name=facebook/opt-13b"
   - "--task_name=Copa"
   - "--output_dir=result/Copa-ft-$TAG"
   - "--num_train_epochs=5"
